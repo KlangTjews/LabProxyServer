@@ -14,6 +14,7 @@
 #include <fcntl.h>
 #include "ThreadPool.h"
 #include "ConnectionManager.h"
+#include "UpstreamManager.h"
 
 constexpr int MAX_EVENTS = 65535;
 
@@ -51,13 +52,13 @@ void parse_args(int argc, char* argv[]) {
                 }
                 break;
             default:
-                std::cerr << "Usage: " << argv[0] << " --ip <IP> --port <PORT> --threads <N> [--proxy <URL>]" << std::endl;
+                std::cerr << "[ERROR] Usage: " << argv[0] << " --ip <IP> --port <PORT> --threads <N> [--proxy <URL>]" << std::endl;
                 std::exit(EXIT_FAILURE);
         }
     }
 
     if (g_ip.empty() || g_port <= 0 || g_thread_count <= 0) {
-        std::cerr << "Missing required parameters" << std::endl;
+        std::cerr << "[ERROR] Missing required parameters" << std::endl;
         std::exit(EXIT_FAILURE);
     }
 }
@@ -103,17 +104,22 @@ int main(int argc, char* argv[]) {
     // 4.懒汉模式初始化
     std::shared_ptr<ThreadPool> pool = ThreadPool::getInstance();
     if (!pool) {
-        std::cerr << "Failed to create thread pool" << std::endl;
+        std::cerr << "[ERROR] Failed to create thread pool" << std::endl;
         return EXIT_FAILURE;
     }
 
     std::shared_ptr<ConnectionManager> ConnMgr = ConnectionManager::getInstance();
     if (!ConnMgr){
-        std::cerr << "Failed to create ConnectionManager" << std::endl;
+        std::cerr << "[ERROR] Failed to create ConnectionManager" << std::endl;
         return EXIT_FAILURE;
     }
 
-    std::cout << "ProxyServer has started, ip: " << g_ip << ", port: " << g_port << ", thread nums: " << g_thread_count << ", upstream server: " << g_proxy_url << std::endl;
+    std::shared_ptr<UpstreamManager> UpMgr = UpstreamManager::getInstance();
+    if (!UpMgr){
+        std::cerr << "[ERROR] Failed to create UpstreamManager" << std::endl;
+    }
+
+    std::cout << "[INIT] ProxyServer has started, ip: " << g_ip << ", port: " << g_port << ", thread nums: " << g_thread_count << ", upstream server: " << g_proxy_url << std::endl;
 
     // 5.转起来了
     std::vector<epoll_event> events(MAX_EVENTS);
@@ -125,7 +131,7 @@ int main(int argc, char* argv[]) {
             break;
         }
         
-        std::cout << "epoll wait: got " << n << " events" << std::endl;
+        std::cout << "[STATE] epoll wait: got " << n << " events" << std::endl;
 
         for (int i = 0; i < n; ++i) {
             int fd = events[i].data.fd;

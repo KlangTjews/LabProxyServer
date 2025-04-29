@@ -21,6 +21,23 @@ const std::string& HTTPRequest::path()    const { return _path; }
 const std::string& HTTPRequest::version() const { return _version; }
 const std::string& HTTPRequest::body()    const { return _body; }
 const std::unordered_map<std::string, std::string>& HTTPRequest::headers() const { return _headers; }
+ParseState HTTPRequest::state() const { return _state; }
+
+std::string HTTPRequest::raw(){
+    std::string result;
+
+    result += _method + " " + _path + " " + _version + "\r\n";
+    // 请求头
+    for (const auto& [key, value] : _headers) {
+        result += key + ": " + value + "\r\n";
+    }
+    // 空行
+    result += "\r\n";
+    // 请求体（如果有）
+    result += _body;
+
+    return result;
+}
 
 bool HTTPRequest::parse(const char* data, size_t len, size_t& out_consumed) {
     size_t pos = 0, used = 0;
@@ -165,4 +182,16 @@ void HTTPRequest::finalize() {
         _keep_alive = (it != _headers.end() && it->second == "keep-alive");
     }
     _state = ParseState::DONE;
+}
+
+void HTTPRequest::reset() {
+    _state = ParseState::REQUEST_LINE;
+    _chunked = false;
+    _keep_alive = false;
+    _content_length = 0;
+    _method.clear();
+    _path.clear();
+    _version.clear();
+    _headers.clear();
+    _body.clear();
 }

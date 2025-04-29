@@ -74,16 +74,21 @@ void ConnectionManager::accept_new_conn(int listen_fd, int epfd){
         // 可以打印客户端信息（可选）
         char ip[INET_ADDRSTRLEN];
         inet_ntop(AF_INET, &client_addr.sin_addr, ip, sizeof(ip));
-        std::cout << "New connection from ip: " << ip << ", port: " << ntohs(client_addr.sin_port) << ", fd: " << client_fd << std::endl;
+        std::cout << "[STATE] New connection from ip: " << ip << ", port: " << ntohs(client_addr.sin_port) << ", fd: " << client_fd << std::endl;
     }
 }
 
 void ConnectionManager::handle_io_event(int fd, uint32_t events, int epfd) {
-    std::cout << "handle_io_event, fd = " << fd << ", events = " << events << std::endl;
-
     ConnCtx* ctx = get_conn(fd);
-    if (!ctx) {
-        std::cerr << "No context for fd " << fd << std::endl;
+    if (!ctx){
+        std::cerr << "[ERROR] no context for fd" << std::endl;
+        return;
+    };
+
+    bool is_client = (fd == ctx->client_fd);
+    bool is_upstream = (fd == ctx->upstream_fd);
+    if (!is_client && !is_upstream) {
+        std::cerr << "[ERROR] cant distinguish is_client or is_upstream" << std::endl;
         return;
     }
 
@@ -97,45 +102,66 @@ void ConnectionManager::handle_io_event(int fd, uint32_t events, int epfd) {
             remove_conn(fd);
             return;
         }
-        ctx->in_buf.append(buf, n);
-        
-        std::cout << "buffer context: " << std::endl << ctx->in_buf.data() << std::endl;
 
-        // 尝试解析请求
-        while (true) {
-            auto buf_view = ctx->in_buf.peek(); // 不动缓冲区
-            if (buf_view.size() == 0) break;
+        if (is_client) {
+            ctx->in_buf.append(buf, n);
+            // 尝试解析请求
+            while (true) {
+                auto view = ctx->in_buf.peek();
+                if (view.empty()) break;
 
-            HTTPRequest req;
-            size_t consumed = 0;
-            if (!req.parse(buf_view.data(), buf_view.size(), consumed)) break; // 数据不足
-            
-            ctx->in_buf.consume(consumed);
-            // 请求成功，放入 pipeline
-            ctx->pipeline.push(req);
-            // 构造响应（此处简化处理）
-            std::string body = "Hello, HTTP!\n";
-            std::string response =
-                "HTTP/1.1 200 OK\r\n"
-                "Content-Type: text/plain\r\n"
-                "Content-Length: " + std::to_string(body.size()) + "\r\n"
-                "Connection: close\r\n"
-                "\r\n" + body;
+                HTTPRequest req;
+                size_t consumed = 0;
+                if (!req.parse(view.data(), view.size(), consumed)) break;
 
-            ctx->out_buf.append(response.c_str(), response.size());
+                ctx->in_buf.consume(consumed);
+                ctx->pipeline.push(req);
+
+                if (ctx->upstream_fd == -1) {
+                    ctx->upstream_fd = connect_to_upstream("127.0.0.1", 8888);
+                    if (ctx->upstream_fd < 0) {
+                        std::cerr << "[ERROR] connect upstream failed" << std::endl;
+                        close(fd);
+                        remove_conn(fd);
+                        return;
+                    }
+
+                    register_conn(ctx->upstream_fd, ctx);
+                    epoll_event ev{};
+                    ev.events = EPOLLIN | EPOLLOUT | EPOLLET;
+                    ev.data.fd = ctx->upstream_fd;
+                    epoll_ctl(epfd, EPOLL_CTL_ADD, ctx->upstream_fd, &ev);
+                }
+
+                std::string raw_req = req.raw();
+                ctx->upstream_out_buf.append(raw_req.data(), raw_req.size());
+            }
+
+            // 注册上游为可写
+            epoll_event ev{};
+            ev.events = EPOLLIN | EPOLLOUT | EPOLLET;
+            ev.data.fd = ctx->upstream_fd;
+            epoll_ctl(epfd, EPOLL_CTL_MOD, ctx->upstream_fd, &ev);
         }
+        else {
+            // 是 upstream 返回的响应
+            ctx->upstream_in_buf.append(buf, n);
+            // 将 upstream 的响应全部塞进 client 的 out_buf
+            ctx->out_buf.append(ctx->upstream_in_buf.data(), ctx->upstream_in_buf.size());
+            ctx->upstream_in_buf.read_all();
 
-        // 修改 epoll，添加可写事件
-        epoll_event ev{};
-        ev.events = EPOLLIN | EPOLLOUT | EPOLLET;
-        ev.data.fd = fd;
-        epoll_ctl(epfd, EPOLL_CTL_MOD, fd, &ev);
+            epoll_event ev{};
+            ev.events = EPOLLIN | EPOLLOUT | EPOLLET;
+            ev.data.fd = ctx->client_fd;
+            epoll_ctl(epfd, EPOLL_CTL_MOD, ctx->client_fd, &ev);
+        }
     }
 
     // ---------- 可写事件 ----------
     if (events & EPOLLOUT) {
-        while (!ctx->out_buf.empty()) {
-            ssize_t n = write(fd, ctx->out_buf.data(), ctx->out_buf.size());
+        Buffer& buf = is_client ? ctx->out_buf : ctx->upstream_out_buf;
+        while (!buf.empty()) {
+            ssize_t n = write(fd, buf.data(), buf.size());
             if (n < 0) {
                 if (errno == EAGAIN || errno == EWOULDBLOCK) break;
                 perror("write");
@@ -143,11 +169,11 @@ void ConnectionManager::handle_io_event(int fd, uint32_t events, int epfd) {
                 remove_conn(fd);
                 return;
             }
-            ctx->out_buf.consume(n);
+            
+            buf.consume(n);
         }
 
-        // 如果写完了，只监听读事件
-        if (ctx->out_buf.empty()) {
+        if (buf.empty()) {
             epoll_event ev{};
             ev.events = EPOLLIN | EPOLLET;
             ev.data.fd = fd;
@@ -155,10 +181,28 @@ void ConnectionManager::handle_io_event(int fd, uint32_t events, int epfd) {
         }
     }
 
-    // ---------- 错误/挂起事件 ----------
+    // ---------- 错误事件 ----------
     if (events & (EPOLLERR | EPOLLHUP)) {
         std::cerr << "epoll error/hup on fd " << fd << std::endl;
         close(fd);
         remove_conn(fd);
     }
+}
+
+int ConnectionManager::connect_to_upstream(const std::string& ip, int port) {
+    int sock = socket(AF_INET, SOCK_STREAM | SOCK_NONBLOCK, 0);
+    if (sock < 0) return -1;
+
+    sockaddr_in addr{};
+    addr.sin_family = AF_INET;
+    addr.sin_port = htons(port);
+    inet_pton(AF_INET, ip.c_str(), &addr.sin_addr);
+
+    if (connect(sock, (sockaddr*)&addr, sizeof(addr)) < 0) {
+        if (errno != EINPROGRESS) {
+            close(sock);
+            return -1;
+        }
+    }
+    return sock;
 }

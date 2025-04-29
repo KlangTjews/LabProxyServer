@@ -28,6 +28,10 @@ public:
     const std::string& version() const;
     const std::string& body()    const;
     const std::unordered_map<std::string, std::string>& headers() const;
+    ParseState state() const;
+    std::string raw();
+
+    void reset();
 
 private:
     bool parse_request_line(const char* data, size_t len, size_t& used);

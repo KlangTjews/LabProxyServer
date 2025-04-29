@@ -19,6 +19,8 @@ struct ConnCtx {
     int upstream_fd = -1;
     Buffer in_buf;
     Buffer out_buf;
+    Buffer upstream_in_buf;   // from upstream
+    Buffer upstream_out_buf;  // to upstream
     std::queue<HTTPRequest> pipeline;
     bool keep_alive = true;
 };
@@ -39,6 +41,8 @@ public:
 
     void accept_new_conn(int fd, int epfd);
     void handle_io_event(int fd, uint32_t events, int epfd);
+    int connect_to_upstream(const std::string& ip, int port);
+
 private:
     std::unordered_map<int, ConnCtx*> _connections;
     std::mutex _mutex;  // 线程池场景下，必须加锁保护
